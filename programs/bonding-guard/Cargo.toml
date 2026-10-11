@@ -1,0 +1,18 @@
+[package]
+name = "bonding-guard"
+version = "0.1.0"
+description = "Token-2022 transfer hook that keeps a launch token bound to its Meteora DBC pool vault during the bonding-curve phase."
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "=2.2.1"
+# The solana platform-tools cargo (1.84) cannot parse edition-2024 crates. Pin the
+# transitive deps that recently migrated so `cargo build-sbf` resolves to a 2021 tree.
+blake3 = "=1.5.5"          # blake3 1.8+ -> digest 0.11 -> block-buffer 0.12 (edition 2024)
+proc-macro-crate = "=3.2.0"  # 3.3+ -> toml_edit 0.25 (edition 2024)
+zeroize = "=1.8.1"         # zeroize 1.9+ is edition 2024 (via curve25519-dalek)
+indexmap = "=2.7.1"        # indexmap 2.14+/hashbrown 0.17+ are edition 2024
+hashbrown = "=0.15.2"

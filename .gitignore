@@ -1,0 +1,14 @@
+node_modules/
+dist/
+test-ledger/
+*.log
+.DS_Store
+
+# build artifacts (cargo target — huge, regenerable)
+programs/*/target/
+
+# keys — never commit
+**/keypair.json
+**/*-keypair.json
+**/*.so
+.env

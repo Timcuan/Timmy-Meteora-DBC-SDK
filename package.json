@@ -1,0 +1,25 @@
+{
+  "name": "@timc/meteora-sdk",
+  "version": "0.1.0",
+  "description": "Meteora Dynamic Bonding Curve (DBC) SDK — full instruction coverage, IDL-driven account decoding, curve math, launch recipes",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "verify": "bun run scripts/verify.ts",
+    "e2e": "bun run scripts/e2e-launch.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.31.0",
+    "@solana/spl-token": "^0.4.13",
+    "@solana/web3.js": "^1.98.0",
+    "bn.js": "^5.2.1",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.6",
+    "@types/bun": "^1.4.2",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
