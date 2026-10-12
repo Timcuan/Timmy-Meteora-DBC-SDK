@@ -51,9 +51,11 @@ import {
   lockerEventAuthority,
   WithdrawMigrationFeeFlag,
   planFixedSupplyLaunch,
+  maxExtractionPreset,
   feeDecay,
   feeAtElapsed,
   feePct,
+  MIN_FEE_NUMERATOR,
   sqrtPriceFromPrice,
   priceFromSqrtPrice,
   type CurvePoint,
@@ -496,6 +498,36 @@ check(
   mig.instructionAccounts.length - 25 === 3,
   `${mig.instructionAccounts.length} - 25`,
 );
+
+// ── presets ──────────────────────────────────────────────────────────────────
+// A preset that throws is worse than no preset: it is exported, documented and
+// unreachable. maxExtractionPreset shipped with a 200 bps cut over 600 periods,
+// which decays under the program's 0.25% fee floor, so every call threw. Pin it.
+section("presets");
+
+{
+  let preset: ReturnType<typeof maxExtractionPreset> | null = null;
+  let err = "";
+  try {
+    preset = maxExtractionPreset({ totalSupply: 1e9, graduationQuote: 65, startPrice: 5e-8 });
+  } catch (e: any) {
+    err = e?.message ?? String(e);
+  }
+  check("maxExtractionPreset is callable", preset !== null, err);
+  if (preset) {
+    const fee = preset.baseFee!;
+    check("maxExtractionPreset fee is geometric", fee.mode === BaseFeeMode.FeeSchedulerExponential, `${fee.mode}`);
+    // the last period must still clear the program floor, or the schedule is illegal
+    const floor = feeAtElapsed(fee, Number(fee.periodFrequency) * fee.numberOfPeriod);
+    check(
+      "maxExtractionPreset fee stays above the program floor",
+      floor >= MIN_FEE_NUMERATOR,
+      `${Number(floor) / 1e7}% >= ${Number(MIN_FEE_NUMERATOR) / 1e7}%`,
+    );
+    eq("maxExtractionPreset swapOnCurve", preset.swapOnCurve, (1e9 * 20) / 100);
+    eq("maxExtractionPreset creator LP", preset.liquiditySplit?.creatorLiquidityPercentage, 89);
+  }
+}
 
 // ── summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${"═".repeat(64)}`);

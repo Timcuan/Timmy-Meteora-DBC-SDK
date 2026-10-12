@@ -90,13 +90,21 @@ export function maxExtractionPreset(input: {
       swapPct: 20,       // minimal float → max leftover (~76% of supply)
       postPct: 30,       // small circulating supply post-migration
       feeCliffPct: 99,
-      feeEndPct: 2,      // as bps%: 2% cut per period (geometric)
+      // Read by allocatorPreset to build its linear schedule, then thrown away:
+      // the geometric `baseFee` below replaces that schedule wholesale. The value
+      // never reaches the chain, but it cannot be omitted — allocatorPreset does
+      // BigInt(Math.round(feeEndPct * 1e7)) and a missing field is a NaN throw.
+      feeEndPct: 0.25,
       feeSeconds: 600,
       enableFirstSwapMinFee: true,
     }),
+    // 99 bps, not more. A 99% cliff cut geometrically over 600 periods lands at
+    // 0.2529%, just above the program's 0.25% floor; 100 bps lands at 0.0005%
+    // and `exponentialFeeDecay` rejects it, which is why this preset used to
+    // throw on every call. `verify.ts` asserts this stays callable.
     baseFee: exponentialFeeDecay({
       cliffFeePct: 99,
-      reductionBps: 200,
+      reductionBps: 99,
       numberOfPeriod: 600,
       periodFrequency: 1n,
     }),
