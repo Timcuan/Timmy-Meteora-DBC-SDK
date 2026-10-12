@@ -1,5 +1,5 @@
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, SYSVAR_INSTRUCTIONS_PUBKEY, ComputeBudgetProgram } from "@solana/web3.js";
-import { createAssociatedTokenAccountInstruction, getAssociatedTokenAddressSync, NATIVE_MINT as WSOL } from "@solana/spl-token";
+import { createAssociatedTokenAccountInstruction, createAssociatedTokenAccountIdempotentInstruction, createSyncNativeInstruction, getAssociatedTokenAddressSync, NATIVE_MINT as WSOL } from "@solana/spl-token";
 import { buildLaunchTransaction, type LaunchInput, type BuiltLaunch } from "./launch.js";
 import { exponentialFeeDecay, cliffVesting, feeAtElapsed } from "./fixed-supply.js";
 import { BaseFeeMode } from "../constants.js";
@@ -321,6 +321,19 @@ export async function atomicLaunch(input: LaunchInput): Promise<AtomicLaunch> {
   });
 
   built.transaction.add(
+    // Fund the wSOL account the first swap spends from. Without these three the
+    // swap runs against an empty token account and the launch fails every time:
+    // create-if-missing, move `gross` lamports in, then sync the token balance
+    // to the lamports (a plain transfer credits lamports, not tokens).
+    // Any amount the PartialFill does not spend stays wrapped in the ATA.
+    createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, wsolAta, payer.publicKey, quoteMint, TOKEN_PROGRAM_ID),
+    SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: wsolAta,
+      // gross is well under 2^53 lamports; transfer takes a number
+      lamports: Number(gross),
+    }),
+    createSyncNativeInstruction(wsolAta),
     createAssociatedTokenAccountInstruction(payer.publicKey, baseAta, payer.publicKey, built.baseMint, TOKEN_2022_PROGRAM_ID),
     swapIx,
   );
