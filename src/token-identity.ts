@@ -21,14 +21,81 @@ export interface TokenIdentity {
   description: string;
 }
 
-// ipfs.io is 429/service-worker-deprecated; try a few gateways for the *fetch*,
-// but keep the original `uri` intact for the launch (it is what indexers resolve).
-const IPFS_GATEWAYS = [
-  "https://ipfs.io",
+// A `uri` must resolve for the token to be listed well, so the fetch rewrites a
+// dead host onto a live gateway while leaving the original `uri` intact for the
+// launch (indexers resolve that, not this).
+//
+// Only gateways verified to answer are listed. The previous list led with
+// ipfs.io, which returns 429 with a service-worker deprecation notice, and also
+// carried cloudflare-ipfs.com and w3s.link, which do not answer at all. Leading
+// with a dead gateway made every metadata read pay a timeout first.
+//
+// Order is measured, not conventional: across three CIDs, Pinata's public
+// gateway answered 429 to all three while Filebase served all three, so Filebase
+// goes first and Pinata is kept as the fallback. Both are still tried, because a
+// rate limit is per-IP and temporary.
+export const IPFS_GATEWAYS = [
+  "https://ipfs.filebase.io",
   "https://gateway.pinata.cloud",
-  "https://cloudflare-ipfs.com",
-  "https://w3s.link",
 ];
+
+/** Hosts that no longer serve content. A `uri` pointing at one is a trap: it
+ *  resolves for nobody, so the token launches with no logo and a weak listing. */
+const DEAD_GATEWAY_HOSTS = [
+  "ipfs.io",
+  "dweb.link",
+  "cloudflare-ipfs.com",
+  "w3s.link",
+  "ipfs.infura.io",
+];
+
+/** The CID inside an `ipfs://` URI or a `/ipfs/<cid>` path, or null. */
+export function ipfsCid(uri: string): string | null {
+  const m = uri.match(/^ipfs:\/\/(.+)$/) || uri.match(/\/ipfs\/(.+)$/);
+  return m ? m[1].split("?")[0].replace(/\/+$/, "") : null;
+}
+
+/** True when a URI points at a gateway that no longer answers. */
+export function usesDeadGateway(uri: string): boolean {
+  const cid = ipfsCid(uri);
+  if (!cid) return false;
+  try {
+    return DEAD_GATEWAY_HOSTS.some((h) => new URL(uri).hostname === h);
+  } catch {
+    return false;
+  }
+}
+
+/** Every URL worth trying for a URI: the URI itself, then each live gateway. */
+export function gatewayCandidates(uri: string): string[] {
+  const cid = ipfsCid(uri);
+  if (!cid) return [uri];
+  return IPFS_GATEWAYS.map((g) => `${g}/ipfs/${cid}`);
+}
+
+/**
+ * A URL that actually serves the image.
+ *
+ * The reference launch's metadata points its `image` at ipfs.io, which returns
+ * 429, so the raw field is not displayable even though the token is indexed
+ * (Jupiter rewrites gateways itself). Rewriting the host here is what makes the
+ * logo appear in the console preview.
+ *
+ * This is the pure rewrite, with no network. Use `firstReachable` when the URL
+ * is about to be shown, since any single gateway can be rate-limited.
+ */
+export function resolvableImageUrl(image: string): string {
+  if (!image) return "";
+  return usesDeadGateway(image) ? gatewayCandidates(image)[0] ?? image : image;
+}
+
+/** The first candidate URL for an asset that actually answers, or null. */
+async function firstReachable(url: string): Promise<string | null> {
+  for (const c of gatewayCandidates(url)) {
+    if (await urlReachable(c)) return c;
+  }
+  return null;
+}
 
 async function fetchJson(url: string): Promise<Record<string, any> | null> {
   try {
@@ -40,18 +107,98 @@ async function fetchJson(url: string): Promise<Record<string, any> | null> {
   }
 }
 
-/** Try the metadata `uri` through every gateway (rewriting an ipfs.io host when present). */
+/** Try the metadata `uri` through every live gateway (a dead host is rewritten). */
 async function fetchMetadataJson(uri: string): Promise<Record<string, any> | null> {
-  const candidates = [uri];
-  if (uri.includes("/ipfs/")) {
-    const cidPath = uri.slice(uri.indexOf("/ipfs/") + "/ipfs/".length);
-    for (const g of IPFS_GATEWAYS) candidates.push(`${g}/ipfs/${cidPath}`);
-  }
-  for (const c of candidates) {
+  for (const c of gatewayCandidates(uri)) {
     const j = await fetchJson(c);
     if (j) return j;
   }
   return null;
+}
+
+/** Does this URL serve anything? The body is cancelled once the status is known. */
+async function urlReachable(url: string): Promise<boolean> {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+    const ok = r.ok;
+    await r.body?.cancel();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+export interface MetadataCheck {
+  ok: boolean;
+  /** Why it failed, in terms a launcher can act on. */
+  reason?: string;
+  /** Warnings that do not block a launch. */
+  warnings: string[];
+  metadata?: { name: string; symbol: string; image: string; description: string };
+  /** A displayable image URL, with a dead gateway rewritten. */
+  imageUrl?: string;
+}
+
+/**
+ * Validate the metadata `uri` a launch is about to write on-chain.
+ *
+ * The mint carries only name/symbol/uri, so this JSON is the entire source of
+ * the logo, the description and every rich listing. A URI that does not resolve
+ * costs real SOL to discover: the launch succeeds, the token has no image, and
+ * indexers rank it lower. Everything here is checkable before signing.
+ */
+export async function checkMetadataUri(
+  uri: string,
+  expected?: { name?: string; symbol?: string },
+): Promise<MetadataCheck> {
+  const trimmed = (uri ?? "").trim();
+  const warnings: string[] = [];
+  if (!trimmed) return { ok: false, reason: "no metadata URI", warnings };
+
+  const json = await fetchMetadataJson(trimmed);
+  if (!json) {
+    return { ok: false, reason: `nothing at ${trimmed} parsed as JSON`, warnings };
+  }
+
+  const name = String(json.name ?? "");
+  const symbol = String(json.symbol ?? "");
+  const image = String(json.image ?? "");
+  const description = String(json.description ?? "");
+
+  if (!image) {
+    return { ok: false, reason: "the JSON has no image field, so the token has no logo", warnings, metadata: { name, symbol, image, description } };
+  }
+
+  if (usesDeadGateway(trimmed)) {
+    warnings.push("this URI points at a gateway that no longer serves content; indexers may fail to read it");
+  }
+
+  // Try every live gateway, not just the rewritten first one: a single gateway
+  // rate-limits (Pinata's public host answered 429 to every CID tried while
+  // Filebase served all of them), and a 429 must not read as "your logo is gone".
+  const imageUrl = await firstReachable(image);
+  if (!imageUrl) {
+    return {
+      ok: false,
+      reason: `the image at ${image} does not load from any live gateway`,
+      warnings, metadata: { name, symbol, image, description },
+    };
+  }
+
+  if (expected?.name && name && name !== expected.name) {
+    warnings.push(`the JSON says name "${name}" but the form says "${expected.name}"`);
+  }
+  if (expected?.symbol && symbol && symbol.toLowerCase() !== expected.symbol.toLowerCase()) {
+    warnings.push(`the JSON says symbol "${symbol}" but the form says "${expected.symbol}"`);
+  }
+  if (!name || !symbol) {
+    warnings.push("the JSON is missing name or symbol; some indexers read only the JSON");
+  }
+  if (!description) {
+    warnings.push("no description in the JSON");
+  }
+
+  return { ok: true, warnings, metadata: { name, symbol, image, description }, imageUrl };
 }
 
 interface JupiterToken {

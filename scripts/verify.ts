@@ -58,6 +58,12 @@ import {
   MIN_FEE_NUMERATOR,
   sqrtPriceFromPrice,
   priceFromSqrtPrice,
+  ipfsCid,
+  usesDeadGateway,
+  gatewayCandidates,
+  resolvableImageUrl,
+  checkMetadataUri,
+  IPFS_GATEWAYS,
   type CurvePoint,
 } from "../src/index.js";
 
@@ -527,6 +533,61 @@ section("presets");
     eq("maxExtractionPreset swapOnCurve", preset.swapOnCurve, (1e9 * 20) / 100);
     eq("maxExtractionPreset creator LP", preset.liquiditySplit?.creatorLiquidityPercentage, 89);
   }
+}
+
+// ── metadata URI ─────────────────────────────────────────────────────────────
+section("metadata URI");
+{
+  const CID = "QmX1evLwhav6Rcnsvx9pFDTfJ8S1GYGHTQrN1wBcv2LYnn"; // the fixture launch's own metadata
+
+  // pure: CID extraction, from either form an author might paste
+  eq("ipfsCid reads ipfs://", ipfsCid(`ipfs://${CID}`), CID);
+  eq("ipfsCid reads a gateway path", ipfsCid(`https://ipfs.io/ipfs/${CID}`), CID);
+  eq("ipfsCid ignores a plain https URI", ipfsCid("https://example.com/meta.json"), null);
+  eq("ipfsCid strips a trailing slash", ipfsCid(`ipfs://${CID}/`), CID);
+
+  // pure: which gateways are dead. ipfs.io is the one that matters, because it
+  // is what every tutorial and the fixture's own image URL point at.
+  check("ipfs.io is flagged dead", usesDeadGateway(`https://ipfs.io/ipfs/${CID}`));
+  check("dweb.link is flagged dead", usesDeadGateway(`https://dweb.link/ipfs/${CID}`));
+  check("a live gateway is not flagged", !usesDeadGateway(`https://gateway.pinata.cloud/ipfs/${CID}`));
+  check("a non-ipfs URL is never flagged", !usesDeadGateway("https://example.com/meta.json"));
+
+  // pure: rewriting. No candidate may point at a host already known dead, or
+  // every read pays a timeout before reaching a gateway that answers.
+  const cands = gatewayCandidates(`ipfs://${CID}`);
+  eq("gatewayCandidates covers every live gateway", cands.length, IPFS_GATEWAYS.length);
+  check(
+    "no candidate points at a dead gateway",
+    cands.every((c) => !usesDeadGateway(c)),
+    cands.join(" "),
+  );
+  check("every candidate carries the CID", cands.every((c) => c.endsWith(CID)));
+  eq("a non-ipfs URI is its own only candidate", gatewayCandidates("https://example.com/m.json").length, 1);
+
+  eq("a dead image host is rewritten", resolvableImageUrl(`https://ipfs.io/ipfs/${CID}`), `${IPFS_GATEWAYS[0]}/ipfs/${CID}`);
+  eq("a live image host is left alone", resolvableImageUrl("https://cdn.example.com/a.png"), "https://cdn.example.com/a.png");
+  eq("an empty image stays empty", resolvableImageUrl(""), "");
+
+  // live: the fixture's real metadata, resolved through a live gateway
+  const good = await checkMetadataUri(`ipfs://${CID}`, { name: "Inference", symbol: "inf" });
+  check("the fixture's metadata passes", good.ok, good.reason ?? "");
+  eq("its name is read", good.metadata?.name, "Inference");
+  check("its image is rewritten off the dead host", !!good.imageUrl && !usesDeadGateway(good.imageUrl), good.imageUrl);
+  check("matching name/symbol produce no warning", !good.warnings.some((w) => w.includes("but the form says")), good.warnings.join("; "));
+  check("an empty description is still reported", good.warnings.some((w) => w.includes("no description")));
+
+  // live: a mismatch must warn, because the mint carries the form's values and
+  // indexers that read only the JSON would show the other name
+  const mismatch = await checkMetadataUri(`ipfs://${CID}`, { name: "Something Else" });
+  check("a name mismatch warns", mismatch.warnings.some((w) => w.includes("but the form says")), mismatch.warnings.join("; "));
+
+  // live: the placeholder this project shipped as a default. It must fail, and
+  // it must fail before signing rather than after the SOL is spent.
+  const placeholder = await checkMetadataUri("https://ipfs.io/ipfs/v0");
+  check("the old placeholder URI is rejected", !placeholder.ok, placeholder.reason ?? "");
+  check("and the rejection is explained", !!placeholder.reason);
+  check("an empty URI is rejected", !(await checkMetadataUri("")).ok);
 }
 
 // ── summary ──────────────────────────────────────────────────────────────────
