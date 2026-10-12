@@ -70,7 +70,13 @@ export const fetchPoolConfig = async (c: Connection, address: PublicKey) => {
   try {
     return decodeAccount("PoolConfig", data);
   } catch {
-    return decodeAccount("ConfigWithTransferHook", data).config as Record<string, any>;
+    // Not a PoolConfig. It may be a ConfigWithTransferHook, or it may be any
+    // other account entirely — a wrong address must read as null, not throw.
+    try {
+      return decodeAccount("ConfigWithTransferHook", data).config as Record<string, any>;
+    } catch {
+      return null;
+    }
   }
 };
 export const fetchTokenBadge = fetcher("TokenBadge");
