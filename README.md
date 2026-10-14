@@ -33,7 +33,7 @@ Every knob is validated client-side before the tx is built (metadata realness, s
 
 ```bash
 bun install
-bun run verify      # 140 assertions against pinned mainnet fixtures
+bun run verify      # 169 assertions against pinned mainnet fixtures
 bun run typecheck
 ```
 
@@ -50,6 +50,7 @@ Re-pin to a newer pool: `bun run scripts/make-fixtures.ts`.
 | `src/layout.ts` | IDL-driven Borsh offset tables |
 | `src/decode.ts` | account decoder + `analyzePoolConfig` / `analyzeVirtualPool` |
 | `src/curve.ts` | exact bigint curve math + offline supply plan |
+| `src/token-identity.ts` | token metadata: `fetchTokenIdentity`, `checkMetadataUri`, the IPFS gateway helpers |
 | `src/program.ts` | Anchor handle, `fetch*`, filtered `getProgramAccounts` scans |
 | `src/ix.ts` | instruction builders |
 | `src/recipes/fixed-supply.ts` | `planFixedSupplyLaunch`, `feeDecay`, `feeAtElapsed` |
@@ -133,6 +134,38 @@ pa.pending.lifetime       // metrics, monotonic
 pa.pending.unclaimed      // currently claimable
 ```
 
+## Token metadata
+
+`initializeVirtualPool` (both the SPL and the Token-2022 variant) writes
+`name`/`symbol`/`uri` into the mint and **drops the metadata authority**, so the
+`uri` is permanent — a URI that does not resolve cannot be corrected after the
+launch. On Token-2022 that lands in the `tokenMetadata` extension with a
+`metadataPointer` at the mint itself. The JSON at `uri` is the entire source of
+the logo, the description and the rich listings.
+
+Check it before signing, not after:
+
+```ts
+import { checkMetadataUri } from "@timc/meteora-sdk";
+
+const check = await checkMetadataUri("ipfs://Qm...", { name: "Inference", symbol: "inf" });
+check.ok         // resolves to JSON, has an image, and the image loads
+check.reason     // why not, in terms a launcher can act on
+check.metadata   // { name, symbol, image, description }
+check.imageUrl   // displayable URL, rewritten off a dead gateway
+check.warnings   // JSON disagrees with the form, missing description, dead gateway, ...
+```
+
+Gateway helpers — pure, except where the fetch is named:
+
+| call | purpose |
+|---|---|
+| `ipfsCid(uri)` | CID from `ipfs://…` or a `/ipfs/…` path, else `null` |
+| `usesDeadGateway(uri)` | the URI points at a host that no longer serves content |
+| `gatewayCandidates(uri)` | live gateway URLs to try, in order |
+| `resolvableImageUrl(image)` | rewrite for display; no network |
+| `IPFS_GATEWAYS` | the ordered live list |
+
 ## The leftover mechanism
 
 `create_config` with `token_supply` set makes the program reserve
@@ -194,6 +227,9 @@ Paths the published SDK's write surface does **not** expose: `create_operator_ac
 - **Exponential fee math is Q64.64, not repeated integer division.** `feeAtElapsed` mirrors the program's square-and-multiply with a truncating `>> 64` per step; the naive per-step `(acc * base) / 10000` drifts by ~9 numerator units over 100 periods.
 - **Token programs are derived from the mint, never assumed.** Hardcoding `TOKEN_PROGRAM_ID` for the quote side breaks every Token-2022 quote mint. `initializeVirtualPool` and `withdrawMigrationFee` read the mint's owner via the program's provider connection; pass `tokenProgram` / `tokenQuoteProgram` explicitly only when building offline.
 - **`buildInstruction` accepts snake_case or camelCase**, and takes a 5th `remainingAccounts` argument. Without it, instructions like `migration_damm_v2` cannot be built at all.
+- **The IPFS gateways most references name are dead.** `ipfs.io` and `dweb.link` answer 429 with a service-worker deprecation notice; `cloudflare-ipfs.com` and `w3s.link` answer nothing at all. Measured live and reliable: `ipfs.filebase.io`. `gateway.pinata.cloud` works but rate-limits hard — it answered 429 to every CID in one run while Filebase served all of them. Try every candidate, not just the first, or a 429 on one host reads as "your image is gone".
+- **Indexed does not mean resolvable.** The `Inference` fixture's metadata points its `image` at `ipfs.io` and Jupiter still returns an icon for it, because Jupiter rewrites gateways itself. Never use "it appears in the indexer" as proof that a URL works.
+- **Enumerating a wallet's token accounts is browser-hostile.** Indexed requests are refused on the free RPCs regardless of CORS, so anything built on `getTokenAccountsByOwner` (or `getProgramAccounts`) has to run in a node process. Test the exact method from a browser origin before designing a page around it.
 
 ## Account types on mainnet
 
